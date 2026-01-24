@@ -1,0 +1,19 @@
+/** @type {import('next').NextConfig} */
+const nextConfig = {
+  reactStrictMode: true,
+  // Enable static export for Vercel deployment
+  output: 'standalone',
+  // API rewrites for development (proxy to backend)
+  async rewrites() {
+    return [
+      {
+        source: '/api/:path*',
+        destination: process.env.NEXT_PUBLIC_API_URL 
+          ? `${process.env.NEXT_PUBLIC_API_URL}/:path*`
+          : 'http://localhost:8000/:path*',
+      },
+    ];
+  },
+};
+
+module.exports = nextConfig;
