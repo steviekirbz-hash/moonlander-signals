@@ -1,266 +1,227 @@
 """
-Signal Generator
-Main orchestrator that fetches data, calculates indicators, and generates signals
+Signal Generator for Moonlander Signals
+Uses CoinGecko API for price data
 """
 
 import asyncio
+import logging
 import json
 import os
 from datetime import datetime
 from typing import Dict, List, Optional
-import logging
 
-from config import MOONLANDER_ASSETS, DATA_OUTPUT_PATH
-from binance_client import BinanceClient
-from indicators import calculate_multi_timeframe_indicators
-from scoring import calculate_final_score, SignalScore
+from coingecko_client import coingecko_client, CoinGeckoClient
+from indicators import analyze_price_data
+from scoring import calculate_signal_score, get_rsi_display
+from config import ASSETS
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
 class SignalGenerator:
-    """Main class to generate trading signals for all assets"""
+    """Generates trading signals from CoinGecko data"""
     
     def __init__(self):
-        self.assets = MOONLANDER_ASSETS
-        self.results = {}
-        
-    def get_tradeable_assets(self) -> List[Dict]:
-        """Get only assets that have Binance data available"""
-        return [a for a in self.assets if a.get("binance")]
+        self.client = coingecko_client
+        self.signals_cache: Dict = {}
+        self.last_update: Optional[datetime] = None
     
-    async def process_single_asset(
-        self,
-        client: BinanceClient,
-        asset: Dict
-    ) -> Optional[Dict]:
-        """
-        Process a single asset:
-        1. Fetch all data from Binance
-        2. Calculate indicators
-        3. Generate score
-        """
-        symbol = asset["symbol"]
-        binance_symbol = asset.get("binance")
-        
-        if not binance_symbol:
-            logger.debug(f"Skipping {symbol} - no Binance symbol")
-            return None
-        
+    async def process_single_asset(self, symbol: str, market_data: Dict) -> Optional[Dict]:
+        """Process a single asset and generate signal"""
         try:
-            # Fetch complete data
-            data = await client.get_complete_asset_data(binance_symbol)
+            asset_info = ASSETS.get(symbol, {})
             
-            if not data or not data.get("klines"):
-                logger.warning(f"No data for {symbol}")
+            # Get OHLC data for technical analysis
+            ohlc_data = await self.client.get_ohlc_for_asset(symbol, days=14)
+            
+            if not ohlc_data or len(ohlc_data) < 50:
+                logger.warning(f"Insufficient OHLC data for {symbol}")
                 return None
             
-            # Calculate indicators across all timeframes
-            indicators = calculate_multi_timeframe_indicators(data["klines"])
+            # Extract close prices from OHLC [timestamp, open, high, low, close]
+            prices = [candle[4] for candle in ohlc_data]
             
-            if not indicators:
-                logger.warning(f"Could not calculate indicators for {symbol}")
+            # Run technical analysis
+            analysis = analyze_price_data(prices, symbol)
+            
+            if not analysis:
                 return None
             
-            # Calculate final score
-            score_result = calculate_final_score(
-                indicator_results=indicators,
-                funding_data=data.get("funding"),
-                oi_data=data.get("open_interest"),
-                ls_ratio_data=data.get("long_short_ratio"),
-            )
+            # Calculate signal score
+            signal = calculate_signal_score(analysis, market_data)
             
-            # Get current price and 24h change
-            ticker = data.get("ticker", {})
+            # Get RSI for display
+            rsi_data = get_rsi_display(analysis.get("rsi"))
             
-            # Extract RSI values for display
-            rsi_values = {}
-            for tf, ind in indicators.items():
-                if ind and ind.get("rsi"):
-                    rsi_values[tf] = ind["rsi"].get("value", 50)
-            
-            # Extract EMA alignment count
-            ema_aligned = sum(
-                1 for tf, ind in indicators.items()
-                if ind and ind.get("ema") and ind["ema"].get("signal") == "bullish"
-            ) if score_result.score > 0 else sum(
-                1 for tf, ind in indicators.items()
-                if ind and ind.get("ema") and ind["ema"].get("signal") == "bearish"
-            )
-            
-            # Extract MACD alignment count
-            macd_aligned = sum(
-                1 for tf, ind in indicators.items()
-                if ind and ind.get("macd") and ind["macd"].get("signal") == "bullish"
-            ) if score_result.score > 0 else sum(
-                1 for tf, ind in indicators.items()
-                if ind and ind.get("macd") and ind["macd"].get("signal") == "bearish"
-            )
-            
-            return {
+            # Build result
+            result = {
                 "symbol": symbol,
-                "name": asset["name"],
-                "category": asset["category"],
-                "binance_symbol": binance_symbol,
-                "price": ticker.get("price", 0),
-                "change_24h": ticker.get("price_change_24h", 0),
-                "volume_24h": ticker.get("quote_volume_24h", 0),
-                "score": score_result.score,
-                "label": score_result.label,
-                "composite_score": score_result.composite_score,
-                "confidence": score_result.confidence,
-                "rsi": rsi_values,
-                "rsi_aligned": score_result.breakdown["rsi"]["fire_count"],
-                "ema_aligned": ema_aligned,
-                "macd_aligned": macd_aligned,
-                "funding_rate": data.get("funding", {}).get("funding_rate") if data.get("funding") else None,
-                "long_short_ratio": data.get("long_short_ratio", {}).get("long_short_ratio") if data.get("long_short_ratio") else None,
-                "liq_zone": "above" if score_result.score > 0 else "below" if score_result.score < 0 else "neutral",
+                "name": asset_info.get("name", symbol),
+                "category": asset_info.get("category", "Other"),
+                "price": market_data.get("price", 0),
+                "change_24h": round(market_data.get("change_24h", 0), 2),
+                "volume_24h": market_data.get("volume_24h", 0),
+                "score": signal["score"],
+                "label": signal["label"],
+                "composite_score": signal["composite_score"],
+                "confidence": signal["confidence"],
+                "rsi": {
+                    "15m": rsi_data["value"],  # We only have daily OHLC, so use same value
+                    "1h": rsi_data["value"],
+                    "4h": rsi_data["value"],
+                    "1d": rsi_data["value"],
+                },
+                "rsi_aligned": 4 if abs(signal["score"]) >= 2 else (2 if signal["score"] != 0 else 0),
+                "ema_aligned": 4 if signal["components"]["trend"] > 0.5 else (2 if signal["components"]["trend"] > 0 else 0),
+                "macd_aligned": 4 if signal["components"]["macd"] > 0.5 else (2 if signal["components"]["macd"] > 0 else 0),
+                "funding_rate": None,  # Not available from CoinGecko
+                "long_short_ratio": None,
+                "liq_zone": "above" if signal["score"] > 0 else ("below" if signal["score"] < 0 else "neutral"),
                 "updated_at": datetime.utcnow().isoformat(),
             }
+            
+            return result
             
         except Exception as e:
             logger.error(f"Error processing {symbol}: {e}")
             return None
     
-    async def process_batch(
-        self,
-        client: BinanceClient,
-        assets: List[Dict],
-        batch_size: int = 5
-    ) -> List[Dict]:
-        """Process assets in batches to manage API rate limits"""
-        results = []
-        
-        for i in range(0, len(assets), batch_size):
-            batch = assets[i:i + batch_size]
-            
-            tasks = [
-                self.process_single_asset(client, asset)
-                for asset in batch
-            ]
-            
-            batch_results = await asyncio.gather(*tasks, return_exceptions=True)
-            
-            for result in batch_results:
-                if isinstance(result, Exception):
-                    logger.error(f"Batch error: {result}")
-                elif result:
-                    results.append(result)
-            
-            # Small delay between batches
-            if i + batch_size < len(assets):
-                await asyncio.sleep(1)
-        
-        return results
-    
     async def generate_all_signals(self) -> Dict:
-        """
-        Generate signals for all tradeable assets
-        Returns complete signal data for the frontend
-        """
-        tradeable = self.get_tradeable_assets()
-        logger.info(f"Processing {len(tradeable)} tradeable assets...")
+        """Generate signals for all configured assets"""
+        logger.info("Starting signal generation...")
         
-        async with BinanceClient() as client:
-            results = await self.process_batch(client, tradeable)
-        
-        # Sort by score (descending)
-        results.sort(key=lambda x: (x["score"], x["composite_score"]), reverse=True)
-        
-        # Calculate summary stats
-        bullish = len([r for r in results if r["score"] > 0])
-        bearish = len([r for r in results if r["score"] < 0])
-        neutral = len([r for r in results if r["score"] == 0])
-        strong_signals = len([r for r in results if abs(r["score"]) >= 2])
-        
-        output = {
-            "generated_at": datetime.utcnow().isoformat(),
-            "total_assets": len(results),
-            "summary": {
+        try:
+            # First, get market data for all assets
+            market_data = await self.client.get_all_market_data()
+            logger.info(f"Fetched market data for {len(market_data)} assets")
+            
+            if not market_data:
+                logger.error("Failed to fetch market data")
+                return self._empty_response()
+            
+            # Process each asset with OHLC data
+            assets = []
+            processed = 0
+            
+            for symbol in market_data.keys():
+                if symbol not in ASSETS:
+                    continue
+                
+                result = await self.process_single_asset(symbol, market_data[symbol])
+                
+                if result:
+                    assets.append(result)
+                    processed += 1
+                    logger.info(f"Processed {symbol}: {result['label']} (score: {result['score']})")
+                
+                # Small delay to respect rate limits
+                await asyncio.sleep(0.5)
+            
+            # Sort by score (strongest signals first)
+            assets.sort(key=lambda x: (-x["score"], -x["composite_score"]))
+            
+            # Calculate summary
+            bullish = sum(1 for a in assets if a["score"] > 0)
+            bearish = sum(1 for a in assets if a["score"] < 0)
+            neutral = sum(1 for a in assets if a["score"] == 0)
+            
+            summary = {
                 "bullish": bullish,
                 "bearish": bearish,
                 "neutral": neutral,
-                "strong_signals": strong_signals,
+                "strong_signals": sum(1 for a in assets if abs(a["score"]) >= 2),
                 "by_score": {
-                    "-3": len([r for r in results if r["score"] == -3]),
-                    "-2": len([r for r in results if r["score"] == -2]),
-                    "-1": len([r for r in results if r["score"] == -1]),
-                    "0": len([r for r in results if r["score"] == 0]),
-                    "1": len([r for r in results if r["score"] == 1]),
-                    "2": len([r for r in results if r["score"] == 2]),
-                    "3": len([r for r in results if r["score"] == 3]),
+                    "-3": sum(1 for a in assets if a["score"] == -3),
+                    "-2": sum(1 for a in assets if a["score"] == -2),
+                    "-1": sum(1 for a in assets if a["score"] == -1),
+                    "0": sum(1 for a in assets if a["score"] == 0),
+                    "1": sum(1 for a in assets if a["score"] == 1),
+                    "2": sum(1 for a in assets if a["score"] == 2),
+                    "3": sum(1 for a in assets if a["score"] == 3),
                 },
-            },
-            "assets": results,
-        }
-        
-        logger.info(f"Generated signals: {bullish} bullish, {bearish} bearish, {neutral} neutral")
-        
-        return output
+            }
+            
+            result = {
+                "generated_at": datetime.utcnow().isoformat(),
+                "total_assets": len(assets),
+                "summary": summary,
+                "assets": assets,
+            }
+            
+            # Cache the results
+            self.signals_cache = result
+            self.last_update = datetime.utcnow()
+            
+            # Save to file
+            self.save_signals(result)
+            
+            logger.info(f"Signal generation complete: {len(assets)} assets processed")
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error generating signals: {e}")
+            return self._empty_response()
     
-    def save_signals(self, data: Dict, output_path: str = None):
+    def _empty_response(self) -> Dict:
+        return {
+            "generated_at": datetime.utcnow().isoformat(),
+            "total_assets": 0,
+            "summary": {
+                "bullish": 0,
+                "bearish": 0,
+                "neutral": 0,
+                "strong_signals": 0,
+                "by_score": {"-3": 0, "-2": 0, "-1": 0, "0": 0, "1": 0, "2": 0, "3": 0},
+            },
+            "assets": [],
+        }
+    
+    def save_signals(self, data: Dict, filepath: str = "data/signals.json"):
         """Save signals to JSON file"""
-        if output_path is None:
-            output_path = DATA_OUTPUT_PATH
-        
-        # Ensure directory exists
-        os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else ".", exist_ok=True)
-        
-        with open(output_path, "w") as f:
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+        with open(filepath, "w") as f:
             json.dump(data, f, indent=2)
+        logger.info(f"Signals saved to {filepath}")
+    
+    def load_signals(self, filepath: str = "data/signals.json") -> Optional[Dict]:
+        """Load signals from JSON file"""
+        try:
+            if os.path.exists(filepath):
+                with open(filepath, "r") as f:
+                    return json.load(f)
+        except Exception as e:
+            logger.error(f"Error loading signals: {e}")
+        return None
+    
+    def get_cached_signals(self) -> Dict:
+        """Get cached signals or load from file"""
+        if self.signals_cache:
+            return self.signals_cache
         
-        logger.info(f"Saved signals to {output_path}")
+        loaded = self.load_signals()
+        if loaded:
+            self.signals_cache = loaded
+            return loaded
+        
+        return self._empty_response()
+
+
+# Global instance
+signal_generator = SignalGenerator()
 
 
 async def main():
-    """Main entry point"""
+    """Run signal generation"""
     generator = SignalGenerator()
-    
-    print("=" * 60)
-    print("MOONLANDER SIGNALS - Signal Generator")
-    print("=" * 60)
-    print()
-    
-    # Generate signals
-    signals = await generator.generate_all_signals()
-    
-    # Save to file
-    generator.save_signals(signals, "data/signals.json")
-    
-    # Print summary
-    print()
-    print("=" * 60)
-    print("SUMMARY")
-    print("=" * 60)
-    print(f"Total assets processed: {signals['total_assets']}")
-    print(f"Bullish signals: {signals['summary']['bullish']}")
-    print(f"Bearish signals: {signals['summary']['bearish']}")
-    print(f"Neutral signals: {signals['summary']['neutral']}")
-    print(f"Strong signals (±2 or ±3): {signals['summary']['strong_signals']}")
-    print()
-    
-    # Print top signals
-    print("TOP BULLISH SIGNALS:")
-    print("-" * 40)
-    for asset in signals["assets"][:5]:
-        if asset["score"] > 0:
-            print(f"  {asset['symbol']:8} | {asset['label']:12} | ${asset['price']:,.4f} | RSI: {asset['rsi'].get('4h', 'N/A')}")
-    
-    print()
-    print("TOP BEARISH SIGNALS:")
-    print("-" * 40)
-    bearish = [a for a in signals["assets"] if a["score"] < 0]
-    for asset in bearish[:5]:
-        print(f"  {asset['symbol']:8} | {asset['label']:12} | ${asset['price']:,.4f} | RSI: {asset['rsi'].get('4h', 'N/A')}")
-    
-    print()
-    print(f"Signals saved to: data/signals.json")
-    print("=" * 60)
+    try:
+        result = await generator.generate_all_signals()
+        print(f"\nGenerated signals for {result['total_assets']} assets")
+        print(f"Bullish: {result['summary']['bullish']}")
+        print(f"Bearish: {result['summary']['bearish']}")
+        print(f"Neutral: {result['summary']['neutral']}")
+    finally:
+        await generator.client.close()
 
 
 if __name__ == "__main__":

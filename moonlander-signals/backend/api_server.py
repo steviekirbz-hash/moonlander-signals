@@ -1,120 +1,94 @@
 """
-FastAPI Server
-Exposes signals data via REST API
+FastAPI Server for Moonlander Signals
+Uses CoinGecko for market data
 """
 
 import asyncio
-import json
-import os
+import logging
 from datetime import datetime, timedelta
 from typing import Optional
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 
-from signal_generator import SignalGenerator
-from config import CACHE_DURATION_SECONDS
+from signal_generator import signal_generator
+from coingecko_client import coingecko_client
 
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# Global cache
-_cache = {
-    "signals": None,
-    "last_update": None,
-}
-
-
-async def refresh_signals():
-    """Refresh signals data"""
-    generator = SignalGenerator()
-    signals = await generator.generate_all_signals()
-    _cache["signals"] = signals
-    _cache["last_update"] = datetime.utcnow()
-    
-    # Also save to file
-    generator.save_signals(signals, "data/signals.json")
-    
-    return signals
-
-
-async def get_cached_signals(force_refresh: bool = False):
-    """Get signals from cache, refreshing if needed"""
-    if force_refresh or _cache["signals"] is None:
-        return await refresh_signals()
-    
-    # Check if cache is stale
-    if _cache["last_update"]:
-        age = datetime.utcnow() - _cache["last_update"]
-        if age.total_seconds() > CACHE_DURATION_SECONDS:
-            return await refresh_signals()
-    
-    return _cache["signals"]
-
-
-async def periodic_refresh():
-    """Background task to refresh signals periodically"""
-    while True:
-        try:
-            await asyncio.sleep(CACHE_DURATION_SECONDS)
-            print(f"[{datetime.utcnow().isoformat()}] Refreshing signals...")
-            await refresh_signals()
-            print(f"[{datetime.utcnow().isoformat()}] Signals refreshed successfully")
-        except Exception as e:
-            print(f"[{datetime.utcnow().isoformat()}] Error refreshing signals: {e}")
+# Cache settings
+CACHE_DURATION = timedelta(minutes=30)  # Refresh every 30 minutes
+last_refresh: Optional[datetime] = None
+is_refreshing = False
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown events"""
-    # Startup: Load initial signals
-    print("Starting Moonlander Signals API...")
+    logger.info("Starting Moonlander Signals API...")
     
-    # Try to load from file first
-    if os.path.exists("data/signals.json"):
-        try:
-            with open("data/signals.json", "r") as f:
-                _cache["signals"] = json.load(f)
-                _cache["last_update"] = datetime.utcnow()
-                print("Loaded signals from cache file")
-        except Exception as e:
-            print(f"Could not load cache file: {e}")
+    # Load cached data on startup
+    cached = signal_generator.load_signals()
+    if cached:
+        signal_generator.signals_cache = cached
+        logger.info(f"Loaded {cached.get('total_assets', 0)} cached signals")
     
-    # Start background refresh task
-    refresh_task = asyncio.create_task(periodic_refresh())
+    # Generate fresh signals on startup (in background)
+    asyncio.create_task(refresh_signals_background())
     
     yield
     
-    # Shutdown
-    refresh_task.cancel()
-    print("Shutting down Moonlander Signals API...")
+    # Cleanup
+    await coingecko_client.close()
+    logger.info("API shutdown complete")
 
 
-# Create FastAPI app
 app = FastAPI(
     title="Moonlander Signals API",
-    description="Crypto trading signals for Moonlander assets",
-    version="1.0.0",
+    description="Multi-timeframe crypto trading signals powered by CoinGecko",
+    version="2.0.0",
     lifespan=lifespan,
 )
 
-# Add CORS middleware
+# CORS - allow all origins for the frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure appropriately for production
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
+async def refresh_signals_background():
+    """Background task to refresh signals"""
+    global last_refresh, is_refreshing
+    
+    if is_refreshing:
+        return
+    
+    is_refreshing = True
+    try:
+        logger.info("Refreshing signals in background...")
+        await signal_generator.generate_all_signals()
+        last_refresh = datetime.utcnow()
+        logger.info("Background refresh complete")
+    except Exception as e:
+        logger.error(f"Background refresh failed: {e}")
+    finally:
+        is_refreshing = False
+
+
 @app.get("/")
 async def root():
-    """API root - basic info"""
+    """API information"""
     return {
         "name": "Moonlander Signals API",
-        "version": "1.0.0",
+        "version": "2.0.0",
         "status": "running",
+        "data_source": "CoinGecko",
         "endpoints": [
             "/signals - Get all signals",
             "/signals/{symbol} - Get signal for specific asset",
@@ -128,158 +102,145 @@ async def root():
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
+    cached = signal_generator.get_cached_signals()
     return {
         "status": "healthy",
-        "cache_loaded": _cache["signals"] is not None,
-        "last_update": _cache["last_update"].isoformat() if _cache["last_update"] else None,
+        "cached_assets": cached.get("total_assets", 0),
+        "last_update": cached.get("generated_at"),
+        "is_refreshing": is_refreshing,
     }
 
 
 @app.get("/signals")
 async def get_signals(
     category: Optional[str] = Query(None, description="Filter by category"),
-    min_score: Optional[int] = Query(None, ge=-3, le=3, description="Minimum score filter"),
-    max_score: Optional[int] = Query(None, ge=-3, le=3, description="Maximum score filter"),
-    sort_by: str = Query("score", description="Sort field: score, symbol, price, change_24h"),
-    sort_dir: str = Query("desc", description="Sort direction: asc or desc"),
-    limit: Optional[int] = Query(None, ge=1, le=100, description="Limit number of results"),
+    min_score: Optional[int] = Query(None, ge=-3, le=3, description="Minimum score"),
+    max_score: Optional[int] = Query(None, ge=-3, le=3, description="Maximum score"),
+    sort_by: Optional[str] = Query("score", description="Sort field"),
+    sort_dir: Optional[str] = Query("desc", description="Sort direction"),
+    limit: Optional[int] = Query(None, ge=1, le=100, description="Limit results"),
 ):
-    """
-    Get all trading signals
+    """Get all signals with optional filters"""
     
-    Optional filters:
-    - category: Filter by asset category (Major, DeFi, Memecoin, etc.)
-    - min_score/max_score: Filter by score range (-3 to 3)
-    - sort_by: Sort by field
-    - sort_dir: Sort direction
-    - limit: Limit results
-    """
-    signals = await get_cached_signals()
+    # Check if we need to refresh
+    global last_refresh
+    if last_refresh is None or datetime.utcnow() - last_refresh > CACHE_DURATION:
+        if not is_refreshing:
+            asyncio.create_task(refresh_signals_background())
     
-    if not signals:
-        raise HTTPException(status_code=503, detail="Signals not available")
-    
-    assets = signals["assets"]
+    data = signal_generator.get_cached_signals()
+    assets = data.get("assets", [])
     
     # Apply filters
     if category:
-        assets = [a for a in assets if a["category"].lower() == category.lower()]
+        assets = [a for a in assets if a.get("category", "").lower() == category.lower()]
     
     if min_score is not None:
-        assets = [a for a in assets if a["score"] >= min_score]
+        assets = [a for a in assets if a.get("score", 0) >= min_score]
     
     if max_score is not None:
-        assets = [a for a in assets if a["score"] <= max_score]
+        assets = [a for a in assets if a.get("score", 0) <= max_score]
     
     # Sort
     reverse = sort_dir.lower() == "desc"
     if sort_by == "score":
-        assets = sorted(assets, key=lambda x: (x["score"], x["composite_score"]), reverse=reverse)
+        assets.sort(key=lambda x: (x.get("score", 0), x.get("composite_score", 0)), reverse=reverse)
     elif sort_by == "symbol":
-        assets = sorted(assets, key=lambda x: x["symbol"], reverse=reverse)
+        assets.sort(key=lambda x: x.get("symbol", ""), reverse=reverse)
     elif sort_by == "price":
-        assets = sorted(assets, key=lambda x: x["price"], reverse=reverse)
+        assets.sort(key=lambda x: x.get("price", 0), reverse=reverse)
     elif sort_by == "change_24h":
-        assets = sorted(assets, key=lambda x: x["change_24h"], reverse=reverse)
+        assets.sort(key=lambda x: x.get("change_24h", 0), reverse=reverse)
     
     # Limit
     if limit:
         assets = assets[:limit]
     
     return {
-        "generated_at": signals["generated_at"],
+        "generated_at": data.get("generated_at"),
         "total_results": len(assets),
         "filters_applied": {
             "category": category,
             "min_score": min_score,
             "max_score": max_score,
         },
+        "summary": data.get("summary", {}),
         "assets": assets,
     }
 
 
 @app.get("/signals/{symbol}")
 async def get_signal_by_symbol(symbol: str):
-    """Get signal for a specific asset by symbol"""
-    signals = await get_cached_signals()
-    
-    if not signals:
-        raise HTTPException(status_code=503, detail="Signals not available")
+    """Get signal for a specific asset"""
+    data = signal_generator.get_cached_signals()
+    assets = data.get("assets", [])
     
     symbol_upper = symbol.upper()
-    asset = next(
-        (a for a in signals["assets"] if a["symbol"] == symbol_upper),
-        None
-    )
+    for asset in assets:
+        if asset.get("symbol") == symbol_upper:
+            return {
+                "generated_at": data.get("generated_at"),
+                "asset": asset,
+            }
     
-    if not asset:
-        raise HTTPException(status_code=404, detail=f"Asset {symbol_upper} not found")
-    
-    return {
-        "generated_at": signals["generated_at"],
-        "asset": asset,
-    }
+    raise HTTPException(status_code=404, detail=f"Asset {symbol} not found")
 
 
 @app.get("/summary")
 async def get_summary():
-    """Get market summary statistics"""
-    signals = await get_cached_signals()
-    
-    if not signals:
-        raise HTTPException(status_code=503, detail="Signals not available")
-    
+    """Get market summary"""
+    data = signal_generator.get_cached_signals()
     return {
-        "generated_at": signals["generated_at"],
-        "total_assets": signals["total_assets"],
-        "summary": signals["summary"],
-        "last_update": _cache["last_update"].isoformat() if _cache["last_update"] else None,
-        "cache_age_seconds": (datetime.utcnow() - _cache["last_update"]).total_seconds() if _cache["last_update"] else None,
+        "generated_at": data.get("generated_at"),
+        "total_assets": data.get("total_assets", 0),
+        "summary": data.get("summary", {}),
     }
 
 
 @app.get("/categories")
 async def get_categories():
-    """Get list of all categories with counts"""
-    signals = await get_cached_signals()
-    
-    if not signals:
-        raise HTTPException(status_code=503, detail="Signals not available")
+    """Get breakdown by category"""
+    data = signal_generator.get_cached_signals()
+    assets = data.get("assets", [])
     
     categories = {}
-    for asset in signals["assets"]:
-        cat = asset["category"]
+    for asset in assets:
+        cat = asset.get("category", "Other")
         if cat not in categories:
             categories[cat] = {"count": 0, "bullish": 0, "bearish": 0, "neutral": 0}
+        
         categories[cat]["count"] += 1
-        if asset["score"] > 0:
+        score = asset.get("score", 0)
+        if score > 0:
             categories[cat]["bullish"] += 1
-        elif asset["score"] < 0:
+        elif score < 0:
             categories[cat]["bearish"] += 1
         else:
             categories[cat]["neutral"] += 1
     
-    return {
-        "categories": categories,
-    }
+    return {"categories": categories}
 
 
 @app.post("/refresh")
 async def force_refresh():
-    """Force refresh signals (use sparingly)"""
-    try:
-        signals = await refresh_signals()
+    """Force refresh signals"""
+    global is_refreshing
+    
+    if is_refreshing:
         return {
-            "status": "success",
-            "message": "Signals refreshed successfully",
-            "generated_at": signals["generated_at"],
-            "total_assets": signals["total_assets"],
+            "status": "already_refreshing",
+            "message": "A refresh is already in progress",
         }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to refresh: {str(e)}")
+    
+    # Start refresh in background
+    asyncio.create_task(refresh_signals_background())
+    
+    return {
+        "status": "started",
+        "message": "Signal refresh started in background",
+    }
 
 
-# Run with: uvicorn api_server:app --reload --port 8000
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
