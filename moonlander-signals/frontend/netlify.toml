@@ -1,0 +1,10 @@
+[build]
+  base = "moonlander-signals/frontend"
+  command = "npm run build"
+  publish = ".next"
+
+[build.environment]
+  NEXT_PUBLIC_DEMO_MODE = "true"
+
+[[plugins]]
+  package = "@netlify/plugin-nextjs"
