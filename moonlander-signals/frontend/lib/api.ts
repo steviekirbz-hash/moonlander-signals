@@ -1,6 +1,6 @@
 // API client for fetching signals data
 
-import { SignalsResponse, FilteredSignalsResponse, CategoriesResponse } from './types';
+import { SignalsResponse, FilteredSignalsResponse, CategoriesResponse, Asset } from './types';
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || '';
 
@@ -69,7 +69,7 @@ export async function fetchCategories(): Promise<CategoriesResponse> {
 
 // Demo data generator for when API is not available
 function generateDemoData(): SignalsResponse {
-  const assets = [
+  const assetConfigs = [
     // Majors
     { symbol: 'BTC', name: 'Bitcoin', category: 'Major', basePrice: 98500 },
     { symbol: 'ETH', name: 'Ethereum', category: 'Major', basePrice: 3250 },
@@ -137,7 +137,7 @@ function generateDemoData(): SignalsResponse {
     { symbol: 'PAXG', name: 'PAX Gold', category: 'Commodity', basePrice: 2750 },
   ];
 
-  const generatedAssets = assets.map(asset => {
+  const generatedAssets: Asset[] = assetConfigs.map(assetConfig => {
     // Generate weighted random score (more neutral, fewer extremes)
     const rand = Math.random();
     let score: number;
@@ -150,32 +150,42 @@ function generateDemoData(): SignalsResponse {
     else score = 3;
 
     const labels: Record<number, string> = {
-      '-3': 'STRONG SHORT',
-      '-2': 'SHORT',
-      '-1': 'LEAN SHORT',
-      '0': 'NEUTRAL',
-      '1': 'LEAN LONG',
-      '2': 'LONG',
-      '3': 'STRONG LONG',
+      [-3]: 'STRONG SHORT',
+      [-2]: 'SHORT',
+      [-1]: 'LEAN SHORT',
+      [0]: 'NEUTRAL',
+      [1]: 'LEAN LONG',
+      [2]: 'LONG',
+      [3]: 'STRONG LONG',
     };
 
     const change24h = (Math.random() * 20 - 10);
-    const price = asset.basePrice * (1 + change24h / 100);
+    const price = assetConfig.basePrice * (1 + change24h / 100);
 
     // Generate RSI values that somewhat correlate with score
     const rsiBase = 50 - score * 10;
     const rsi = {
-      '15m': Math.max(10, Math.min(90, rsiBase + (Math.random() * 30 - 15))),
-      '1h': Math.max(10, Math.min(90, rsiBase + (Math.random() * 25 - 12))),
-      '4h': Math.max(10, Math.min(90, rsiBase + (Math.random() * 20 - 10))),
-      '1d': Math.max(10, Math.min(90, rsiBase + (Math.random() * 15 - 7))),
+      '15m': Math.round(Math.max(10, Math.min(90, rsiBase + (Math.random() * 30 - 15)))),
+      '1h': Math.round(Math.max(10, Math.min(90, rsiBase + (Math.random() * 25 - 12)))),
+      '4h': Math.round(Math.max(10, Math.min(90, rsiBase + (Math.random() * 20 - 10)))),
+      '1d': Math.round(Math.max(10, Math.min(90, rsiBase + (Math.random() * 15 - 7)))),
     };
 
+    // Determine liq_zone based on score
+    let liqZone: 'above' | 'below' | 'neutral';
+    if (score > 0) {
+      liqZone = 'above';
+    } else if (score < 0) {
+      liqZone = 'below';
+    } else {
+      liqZone = 'neutral';
+    }
+
     return {
-      symbol: asset.symbol,
-      name: asset.name,
-      category: asset.category,
-      binance_symbol: `${asset.symbol}USDT`,
+      symbol: assetConfig.symbol,
+      name: assetConfig.name,
+      category: assetConfig.category,
+      binance_symbol: `${assetConfig.symbol}USDT`,
       price,
       change_24h: parseFloat(change24h.toFixed(2)),
       volume_24h: Math.random() * 1000000000,
@@ -183,18 +193,13 @@ function generateDemoData(): SignalsResponse {
       label: labels[score],
       composite_score: score * 0.2 + (Math.random() * 0.2 - 0.1),
       confidence: 0.5 + Math.random() * 0.5,
-      rsi: {
-        '15m': Math.round(rsi['15m']),
-        '1h': Math.round(rsi['1h']),
-        '4h': Math.round(rsi['4h']),
-        '1d': Math.round(rsi['1d']),
-      },
+      rsi,
       rsi_aligned: Math.floor(Math.random() * 5),
       ema_aligned: Math.floor(Math.random() * 5),
       macd_aligned: Math.floor(Math.random() * 5),
       funding_rate: (Math.random() * 0.002 - 0.001),
       long_short_ratio: 0.5 + Math.random(),
-      liq_zone: score > 0 ? 'above' : score < 0 ? 'below' : 'neutral' as const,
+      liq_zone: liqZone,
       updated_at: new Date().toISOString(),
     };
   });
