@@ -1,70 +1,109 @@
 // API client for fetching signals data
 
-import { SignalsResponse, FilteredSignalsResponse, CategoriesResponse, Asset } from './types';
+import { SignalsResponse, CategoriesResponse, Asset } from './types';
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || '';
-
-// For static/demo mode when no API is available
 const DEMO_MODE = process.env.NEXT_PUBLIC_DEMO_MODE === 'true';
 
 export async function fetchSignals(): Promise<SignalsResponse> {
-  if (DEMO_MODE) {
-    return generateDemoData();
+  // Try to fetch from API first if we have a URL and not in demo mode
+  if (API_BASE_URL && !DEMO_MODE) {
+    try {
+      console.log('Fetching from API:', `${API_BASE_URL}/signals`);
+      const res = await fetch(`${API_BASE_URL}/signals`, {
+        cache: 'no-store', // Always fetch fresh data
+        headers: {
+          'Accept': 'application/json',
+        },
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        console.log('API response:', data);
+        
+        // Check if we got actual data
+        if (data.assets && data.assets.length > 0) {
+          // Transform API response to match expected format
+          return {
+            generated_at: data.generated_at,
+            total_assets: data.total_results || data.assets.length,
+            summary: data.summary || {
+              bullish: data.assets.filter((a: Asset) => a.score > 0).length,
+              bearish: data.assets.filter((a: Asset) => a.score < 0).length,
+              neutral: data.assets.filter((a: Asset) => a.score === 0).length,
+              strong_signals: data.assets.filter((a: Asset) => Math.abs(a.score) >= 2).length,
+              by_score: {
+                '-3': data.assets.filter((a: Asset) => a.score === -3).length,
+                '-2': data.assets.filter((a: Asset) => a.score === -2).length,
+                '-1': data.assets.filter((a: Asset) => a.score === -1).length,
+                '0': data.assets.filter((a: Asset) => a.score === 0).length,
+                '1': data.assets.filter((a: Asset) => a.score === 1).length,
+                '2': data.assets.filter((a: Asset) => a.score === 2).length,
+                '3': data.assets.filter((a: Asset) => a.score === 3).length,
+              },
+            },
+            assets: data.assets,
+          };
+        }
+        console.log('API returned empty data, falling back to demo');
+      } else {
+        console.error('API error:', res.status, res.statusText);
+      }
+    } catch (error) {
+      console.error('Failed to fetch from API:', error);
+    }
+  } else {
+    console.log('Using demo mode. API_URL:', API_BASE_URL, 'DEMO_MODE:', DEMO_MODE);
   }
 
-  const res = await fetch(`${API_BASE_URL}/signals`, {
-    next: { revalidate: 300 }, // Cache for 5 minutes
-  });
-
-  if (!res.ok) {
-    throw new Error('Failed to fetch signals');
-  }
-
-  return res.json();
+  // Fall back to demo data
+  return generateDemoData();
 }
 
 export async function fetchSignalBySymbol(symbol: string) {
-  if (DEMO_MODE) {
-    const data = generateDemoData();
-    const asset = data.assets.find(a => a.symbol === symbol.toUpperCase());
-    if (!asset) throw new Error('Asset not found');
-    return { generated_at: data.generated_at, asset };
+  if (API_BASE_URL && !DEMO_MODE) {
+    try {
+      const res = await fetch(`${API_BASE_URL}/signals/${symbol}`);
+      if (res.ok) {
+        return res.json();
+      }
+    } catch (error) {
+      console.error('Failed to fetch signal:', error);
+    }
   }
 
-  const res = await fetch(`${API_BASE_URL}/signals/${symbol}`);
-  
-  if (!res.ok) {
-    throw new Error('Failed to fetch signal');
-  }
-
-  return res.json();
+  const data = generateDemoData();
+  const asset = data.assets.find(a => a.symbol === symbol.toUpperCase());
+  if (!asset) throw new Error('Asset not found');
+  return { generated_at: data.generated_at, asset };
 }
 
 export async function fetchCategories(): Promise<CategoriesResponse> {
-  if (DEMO_MODE) {
-    const data = generateDemoData();
-    const categories: Record<string, { count: number; bullish: number; bearish: number; neutral: number }> = {};
-    
-    data.assets.forEach(asset => {
-      if (!categories[asset.category]) {
-        categories[asset.category] = { count: 0, bullish: 0, bearish: 0, neutral: 0 };
+  if (API_BASE_URL && !DEMO_MODE) {
+    try {
+      const res = await fetch(`${API_BASE_URL}/categories`);
+      if (res.ok) {
+        return res.json();
       }
-      categories[asset.category].count++;
-      if (asset.score > 0) categories[asset.category].bullish++;
-      else if (asset.score < 0) categories[asset.category].bearish++;
-      else categories[asset.category].neutral++;
-    });
-
-    return { categories };
+    } catch (error) {
+      console.error('Failed to fetch categories:', error);
+    }
   }
 
-  const res = await fetch(`${API_BASE_URL}/categories`);
+  const data = generateDemoData();
+  const categories: Record<string, { count: number; bullish: number; bearish: number; neutral: number }> = {};
   
-  if (!res.ok) {
-    throw new Error('Failed to fetch categories');
-  }
+  data.assets.forEach(asset => {
+    if (!categories[asset.category]) {
+      categories[asset.category] = { count: 0, bullish: 0, bearish: 0, neutral: 0 };
+    }
+    categories[asset.category].count++;
+    if (asset.score > 0) categories[asset.category].bullish++;
+    else if (asset.score < 0) categories[asset.category].bearish++;
+    else categories[asset.category].neutral++;
+  });
 
-  return res.json();
+  return { categories };
 }
 
 // Demo data generator for when API is not available
