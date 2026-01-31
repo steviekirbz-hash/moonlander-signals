@@ -139,7 +139,7 @@ class CoinGeckoClient:
         }
         return await self._request("/coins/markets", params)
     
-    async def get_ohlc(self, coin_id: str, days: int = 14) -> Optional[List]:
+    async def get_ohlc(self, coin_id: str, days: int = 30) -> Optional[List]:
         """
         Get OHLC data for a coin
         Days: 1, 7, 14, 30, 90, 180, 365, max
@@ -198,7 +198,7 @@ class CoinGeckoClient:
         
         return results
     
-    async def get_ohlc_for_asset(self, symbol: str, days: int = 14) -> Optional[List]:
+    async def get_ohlc_for_asset(self, symbol: str, days: int = 30) -> Optional[List]:
         """Get OHLC data for a specific asset"""
         coin_id = self.SYMBOL_TO_ID.get(symbol)
         if not coin_id:
@@ -213,8 +213,8 @@ class CoinGeckoClient:
         if not coin_id:
             return None
         
-        # Get OHLC data (14 days gives us enough for indicators)
-        ohlc = await self.get_ohlc(coin_id, days=14)
+        # Get OHLC data (30 days gives us enough for indicators)
+        ohlc = await self.get_ohlc(coin_id, days=30)
         
         # Get market chart for more granular data
         chart = await self.get_market_chart(coin_id, days=14)
