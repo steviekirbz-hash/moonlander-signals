@@ -1,6 +1,6 @@
 """
 FastAPI Server for Moonlander Signals
-Uses CoinGecko for market data
+Uses CoinGecko for market data + Fear & Greed Index
 """
 
 import asyncio
@@ -14,6 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from signal_generator import signal_generator
 from coingecko_client import coingecko_client
+from fear_greed_client import fear_greed_client
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -42,13 +43,14 @@ async def lifespan(app: FastAPI):
     
     # Cleanup
     await coingecko_client.close()
+    await fear_greed_client.close()
     logger.info("API shutdown complete")
 
 
 app = FastAPI(
     title="Moonlander Signals API",
-    description="Multi-timeframe crypto trading signals powered by CoinGecko",
-    version="2.0.0",
+    description="Multi-timeframe crypto trading signals with Fear & Greed, ADX, and DeMark indicators",
+    version="2.1.0",
     lifespan=lifespan,
 )
 
@@ -86,13 +88,22 @@ async def root():
     """API information"""
     return {
         "name": "Moonlander Signals API",
-        "version": "2.0.0",
+        "version": "2.1.0",
         "status": "running",
         "data_source": "CoinGecko",
+        "indicators": [
+            "RSI (Relative Strength Index)",
+            "MACD (Moving Average Convergence Divergence)",
+            "ADX (Average Directional Index)",
+            "DeMark Sequential (TD Sequential 1-9)",
+            "Relative Volume",
+            "Fear & Greed Index",
+        ],
         "endpoints": [
             "/signals - Get all signals",
             "/signals/{symbol} - Get signal for specific asset",
             "/summary - Get market summary",
+            "/fear-greed - Get Fear & Greed Index",
             "/refresh - Force refresh signals (POST)",
             "/health - Health check",
         ],
@@ -108,7 +119,30 @@ async def health_check():
         "cached_assets": cached.get("total_assets", 0),
         "last_update": cached.get("generated_at"),
         "is_refreshing": is_refreshing,
+        "fear_greed": cached.get("fear_greed", {}).get("value"),
     }
+
+
+@app.get("/fear-greed")
+async def get_fear_greed():
+    """Get current Fear & Greed Index"""
+    cached = signal_generator.get_cached_signals()
+    fg_data = cached.get("fear_greed")
+    
+    if fg_data:
+        return fg_data
+    
+    # Fetch fresh if not cached
+    try:
+        return await fear_greed_client.get_fear_greed()
+    except Exception as e:
+        logger.error(f"Error fetching Fear & Greed: {e}")
+        return {
+            "value": 50,
+            "classification": "Neutral",
+            "change_24h": 0,
+            "change_direction": "unchanged"
+        }
 
 
 @app.get("/signals")
@@ -151,6 +185,8 @@ async def get_signals(
         assets.sort(key=lambda x: x.get("price", 0), reverse=reverse)
     elif sort_by == "change_24h":
         assets.sort(key=lambda x: x.get("change_24h", 0), reverse=reverse)
+    elif sort_by == "adx":
+        assets.sort(key=lambda x: x.get("adx", {}).get("value", 0), reverse=reverse)
     
     # Limit
     if limit:
@@ -164,6 +200,7 @@ async def get_signals(
             "min_score": min_score,
             "max_score": max_score,
         },
+        "fear_greed": data.get("fear_greed", {}),
         "summary": data.get("summary", {}),
         "assets": assets,
     }
@@ -180,6 +217,7 @@ async def get_signal_by_symbol(symbol: str):
         if asset.get("symbol") == symbol_upper:
             return {
                 "generated_at": data.get("generated_at"),
+                "fear_greed": data.get("fear_greed", {}),
                 "asset": asset,
             }
     
@@ -193,6 +231,7 @@ async def get_summary():
     return {
         "generated_at": data.get("generated_at"),
         "total_assets": data.get("total_assets", 0),
+        "fear_greed": data.get("fear_greed", {}),
         "summary": data.get("summary", {}),
     }
 
