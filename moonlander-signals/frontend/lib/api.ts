@@ -36,6 +36,43 @@ export async function fetchSignals(): Promise<SignalsResponse> {
   return generateDemoData();
 }
 
+// Legacy export for backward compatibility
+export function formatFunding(value: number | undefined | null): string {
+  if (value === undefined || value === null) return 'N/A';
+  const percentage = value * 100;
+  const sign = percentage >= 0 ? '+' : '';
+  return `${sign}${percentage.toFixed(3)}%`;
+}
+
+// Legacy export for backward compatibility
+export function formatPrice(price: number): string {
+  if (price >= 1000) {
+    return price.toLocaleString(undefined, { maximumFractionDigits: 0 });
+  } else if (price >= 1) {
+    return price.toLocaleString(undefined, { maximumFractionDigits: 2 });
+  } else {
+    return price.toLocaleString(undefined, { maximumFractionDigits: 6 });
+  }
+}
+
+// Legacy export for backward compatibility
+export function formatVolume(volume: number): string {
+  if (volume >= 1e9) {
+    return `$${(volume / 1e9).toFixed(2)}B`;
+  } else if (volume >= 1e6) {
+    return `$${(volume / 1e6).toFixed(2)}M`;
+  } else if (volume >= 1e3) {
+    return `$${(volume / 1e3).toFixed(2)}K`;
+  }
+  return `$${volume.toFixed(2)}`;
+}
+
+// Legacy export for backward compatibility
+export function formatChange(change: number): string {
+  const sign = change >= 0 ? '+' : '';
+  return `${sign}${change.toFixed(2)}%`;
+}
+
 function calculateSummary(assets: Asset[]) {
   return {
     bullish: assets.filter(a => a.score > 0).length,
