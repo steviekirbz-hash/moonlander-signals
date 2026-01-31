@@ -95,3 +95,14 @@ SCORE_THRESHOLDS = {
     "short": -0.35,
     "strong_short": -0.6,
 }
+
+# Indicator weights for scoring
+INDICATOR_WEIGHTS = {
+    "rsi": 0.25,
+    "macd": 0.15,
+    "trend": 0.20,
+    "adx": 0.15,  # Applied as modifier
+    "demark": 0.15,
+    "volume": 0.05,
+    "fear_greed": 0.05,
+}
