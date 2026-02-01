@@ -12,7 +12,10 @@ from indicators import (
     calculate_rsi, calculate_macd, calculate_bollinger_bands,
     calculate_trend, calculate_adx, calculate_demark, calculate_relative_volume
 )
-from scoring import calculate_composite_score, format_signal_output
+from scoring import (
+    calculate_signal_score, get_rsi_display, get_adx_display,
+    get_demark_display, get_volume_display
+)
 from config import ASSETS
 from fear_greed_client import fear_greed_client
 
@@ -23,12 +26,12 @@ def calculate_multi_period_rsi(closes: List[float]) -> Dict[str, Optional[float]
     """
     Calculate RSI with different periods to show momentum at different sensitivities.
     
-    - RSI(7): Most reactive, shows very recent momentum
-    - RSI(10): Reactive, short-term momentum  
-    - RSI(14): Standard, medium-term momentum
-    - RSI(21): Smoothest, longer-term momentum
+    - RSI(7): Most reactive, shows very recent momentum (labeled as 15m)
+    - RSI(10): Reactive, short-term momentum (labeled as 1h)
+    - RSI(14): Standard, medium-term momentum (labeled as 4h)
+    - RSI(21): Smoothest, longer-term momentum (labeled as 1d)
     
-    We label these as timeframes (15m, 1h, 4h, 1d) for UI purposes,
+    We label these as timeframes for UI purposes,
     but they're actually different RSI periods on daily data.
     """
     if not closes or len(closes) < 22:
@@ -42,12 +45,13 @@ def calculate_multi_period_rsi(closes: List[float]) -> Dict[str, Optional[float]
     }
 
 
-async def generate_signal(asset_config: Dict) -> Optional[Dict]:
+async def generate_signal(asset_config: Dict, fear_greed_value: Optional[int] = None) -> Optional[Dict]:
     """
     Generate trading signal for a single asset.
     
     Args:
         asset_config: Asset configuration from config.py
+        fear_greed_value: Current Fear & Greed index value
         
     Returns:
         Signal data dictionary or None if failed
@@ -64,7 +68,6 @@ async def generate_signal(asset_config: Dict) -> Optional[Dict]:
             return None
         
         # Extract price arrays
-        timestamps = [candle[0] for candle in ohlc]
         opens = [candle[1] for candle in ohlc]
         highs = [candle[2] for candle in ohlc]
         lows = [candle[3] for candle in ohlc]
@@ -76,10 +79,11 @@ async def generate_signal(asset_config: Dict) -> Optional[Dict]:
         change_24h = market_data.get("change_24h", 0) if market_data else 0
         volume_24h = market_data.get("volume_24h", 0) if market_data else 0
         
-        # Calculate indicators
+        # Calculate multi-period RSI
         rsi_multi = calculate_multi_period_rsi(closes)
         rsi_primary = rsi_multi.get("4h")  # Use RSI(14) as primary for scoring
         
+        # Calculate other indicators
         macd = calculate_macd(closes)
         bollinger = calculate_bollinger_bands(closes)
         trend = calculate_trend(closes)
@@ -93,35 +97,46 @@ async def generate_signal(asset_config: Dict) -> Optional[Dict]:
             volumes = [v[1] for v in volume_data["total_volumes"]]
             relative_volume = calculate_relative_volume(volumes)
         
-        # Calculate composite score
-        score_result = calculate_composite_score(
-            rsi=rsi_primary,
-            macd=macd,
-            trend=trend,
-            adx=adx,
-            demark=demark,
-            relative_volume=relative_volume,
+        # Build analysis dict for scoring
+        analysis = {
+            "rsi": rsi_primary,
+            "macd": macd,
+            "bollinger": bollinger,
+            "trend": trend,
+            "adx": adx,
+            "demark": demark,
+            "volume": relative_volume,
+        }
+        
+        # Calculate score using existing scoring function
+        score_result = calculate_signal_score(
+            analysis=analysis,
+            market_data={"change_24h": change_24h},
+            fear_greed=fear_greed_value
         )
         
-        # Format output
-        signal = format_signal_output(
-            symbol=symbol,
-            name=asset_config["name"],
-            category=asset_config["category"],
-            price=current_price,
-            change_24h=change_24h,
-            volume_24h=volume_24h,
-            rsi=rsi_multi,
-            macd=macd,
-            bollinger=bollinger,
-            trend=trend,
-            adx=adx,
-            demark=demark,
-            relative_volume=relative_volume,
-            score_result=score_result,
-        )
+        # Format output for API response
+        signal = {
+            "symbol": symbol,
+            "name": asset_config["name"],
+            "category": asset_config["category"],
+            "price": current_price,
+            "change_24h": round(change_24h, 2) if change_24h else 0,
+            "volume_24h": volume_24h,
+            "score": score_result["score"],
+            "label": score_result["label"],
+            "composite_score": score_result["composite_score"],
+            "confidence": score_result["confidence"],
+            "rsi": rsi_multi,  # Multi-period RSI for display
+            "adx": get_adx_display(adx),
+            "demark": get_demark_display(demark),
+            "relative_volume": get_volume_display(relative_volume),
+            "ema_aligned": 1 if trend and trend.get("trend") == "bullish" else 0,
+            "macd_aligned": 1 if macd and macd.get("bullish") else 0,
+            "updated_at": datetime.utcnow().isoformat() + "Z",
+        }
         
-        logger.info(f"Processed {symbol}: {signal['label']} (score: {signal['score']}, RSI: {rsi_multi})")
+        logger.info(f"Processed {symbol}: {signal['label']} (score: {signal['score']}, ADX: {adx.get('adx') if adx else 'N/A'}, DeMark: {get_demark_display(demark).get('display')})")
         
         return signal
         
@@ -144,13 +159,15 @@ async def generate_all_signals(fear_greed_data: Optional[Dict] = None) -> Dict:
     if fear_greed_data is None:
         fear_greed_data = await fear_greed_client.get_fear_greed()
     
+    fear_greed_value = fear_greed_data.get("value") if fear_greed_data else None
+    
     if fear_greed_data:
-        logger.info(f"Fear & Greed Index: {fear_greed_data.get('value')} ({fear_greed_data.get('classification')})")
+        logger.info(f"Fear & Greed Index: {fear_greed_value} ({fear_greed_data.get('classification')})")
     
     signals = []
     
     for asset_config in ASSETS:
-        signal = await generate_signal(asset_config)
+        signal = await generate_signal(asset_config, fear_greed_value)
         if signal:
             signals.append(signal)
     
