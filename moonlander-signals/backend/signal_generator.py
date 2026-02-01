@@ -51,12 +51,16 @@ class SignalGenerator:
             "1d": calculate_rsi(closes, period=21),   # Smoothest
         }
     
-    async def generate_signal(self, asset_config: Dict, fear_greed_value: Optional[int] = None) -> Optional[Dict]:
+    async def generate_signal(self, symbol: str, asset_info: Dict, market_data: Dict, fear_greed_value: Optional[int] = None) -> Optional[Dict]:
         """Generate trading signal for a single asset."""
-        symbol = asset_config["symbol"]
-        coingecko_id = asset_config["coingecko_id"]
         
         try:
+            # Get CoinGecko ID from the client's mapping
+            coingecko_id = coingecko_client.SYMBOL_TO_ID.get(symbol)
+            if not coingecko_id:
+                logger.warning(f"No CoinGecko ID mapping for {symbol}")
+                return None
+            
             # Fetch OHLC data (30 days of daily candles)
             ohlc = await coingecko_client.get_ohlc(coingecko_id, days=30)
             
@@ -69,11 +73,10 @@ class SignalGenerator:
             lows = [candle[3] for candle in ohlc]
             closes = [candle[4] for candle in ohlc]
             
-            # Get current price and 24h change from market data
-            market_data = await coingecko_client.get_price(coingecko_id)
-            current_price = market_data.get("price", closes[-1]) if market_data else closes[-1]
-            change_24h = market_data.get("change_24h", 0) if market_data else 0
-            volume_24h = market_data.get("volume_24h", 0) if market_data else 0
+            # Get price info from market_data (already fetched in batch)
+            current_price = market_data.get("price", closes[-1])
+            change_24h = market_data.get("change_24h", 0)
+            volume_24h = market_data.get("volume_24h", 0)
             
             # Calculate multi-period RSI
             rsi_multi = self.calculate_multi_period_rsi(closes)
@@ -87,10 +90,10 @@ class SignalGenerator:
             demark = calculate_demark(closes)
             
             # Get volume data for relative volume calculation
-            volume_data = await coingecko_client.get_market_chart(coingecko_id, days=14)
+            chart_data = await coingecko_client.get_market_chart(coingecko_id, days=14)
             relative_volume = None
-            if volume_data and "total_volumes" in volume_data:
-                volumes = [v[1] for v in volume_data["total_volumes"]]
+            if chart_data and "total_volumes" in chart_data:
+                volumes = [v[1] for v in chart_data["total_volumes"]]
                 relative_volume = calculate_relative_volume(volumes)
             
             # Build analysis dict for scoring
@@ -114,8 +117,8 @@ class SignalGenerator:
             # Format output for API response
             signal = {
                 "symbol": symbol,
-                "name": asset_config["name"],
-                "category": asset_config["category"],
+                "name": asset_info.get("name", symbol),
+                "category": asset_info.get("category", "Other"),
                 "price": current_price,
                 "change_24h": round(change_24h, 2) if change_24h else 0,
                 "volume_24h": volume_24h,
@@ -151,10 +154,17 @@ class SignalGenerator:
         if fear_greed_data:
             logger.info(f"Fear & Greed Index: {fear_greed_value} ({fear_greed_data.get('classification')})")
         
+        # Fetch all market data in batch first
+        all_market_data = await coingecko_client.get_all_market_data()
+        
         signals = []
         
-        for asset_config in ASSETS:
-            signal = await self.generate_signal(asset_config, fear_greed_value)
+        # ASSETS is a dict: {"BTC": {"name": "Bitcoin", "category": "Major"}, ...}
+        for symbol, asset_info in ASSETS.items():
+            # Get market data for this symbol
+            market_data = all_market_data.get(symbol, {})
+            
+            signal = await self.generate_signal(symbol, asset_info, market_data, fear_greed_value)
             if signal:
                 signals.append(signal)
         
@@ -215,6 +225,15 @@ class SignalGenerator:
         except Exception as e:
             logger.error(f"Error loading cache: {e}")
         return None
+    
+    def clear_cache(self):
+        """Clear the signals cache"""
+        self.signals_cache = {}
+        if os.path.exists(CACHE_FILE):
+            try:
+                os.remove(CACHE_FILE)
+            except Exception as e:
+                logger.error(f"Error removing cache file: {e}")
 
 
 # Singleton instance - this is what api_server.py imports
