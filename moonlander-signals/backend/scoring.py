@@ -3,12 +3,11 @@ Scoring Engine for Moonlander Signals
 Generates -3 to +3 scores based on technical analysis
 
 Indicators used:
-- RSI (25%) - Overbought/Oversold
-- MACD (15%) - Momentum & Crossovers
-- Trend/EMA (20%) - Trend direction
-- ADX (15%) - Trend strength modifier
-- DeMark (15%) - Exhaustion/Reversal signals
-- Volume (5%) - Confirmation
+- RSI (30%) - Overbought/Oversold
+- MACD (20%) - Momentum & Crossovers
+- ADX (15%) - Trend strength modifier (with exhaustion detection)
+- DeMark (20%) - Exhaustion/Reversal signals
+- Volume (10%) - Confirmation
 - Fear & Greed (5%) - Market sentiment
 """
 
@@ -73,59 +72,20 @@ def score_macd(macd: Optional[Dict]) -> float:
     return max(-1, min(1, score))
 
 
-def score_trend(trend: Dict) -> float:
-    """
-    Score EMA trend alignment
-    Returns -1 to +1
-    """
-    if not trend:
-        return 0
-    
-    trend_dir = trend.get("trend", "neutral")
-    strength = trend.get("strength", 0)
-    
-    if trend_dir == "bullish":
-        return strength
-    elif trend_dir == "bearish":
-        return -strength
-    else:
-        return 0
-
-
-def score_bollinger(bollinger: Optional[Dict]) -> float:
-    """
-    Score Bollinger Band position (mean reversion)
-    Returns -1 to +1
-    """
-    if not bollinger:
-        return 0
-    
-    percent_b = bollinger.get("percent_b", 0.5)
-    
-    # Below lower band = oversold = bullish
-    if percent_b < 0:
-        return 0.8
-    elif percent_b < 0.2:
-        return 0.5
-    elif percent_b < 0.4:
-        return 0.2
-    elif percent_b < 0.6:
-        return 0  # Middle = neutral
-    elif percent_b < 0.8:
-        return -0.2
-    elif percent_b < 1.0:
-        return -0.5
-    else:
-        return -0.8  # Above upper band = overbought = bearish
-
-
 def score_adx(adx_data: Optional[Dict], base_score: float) -> float:
     """
-    ADX modifies the confidence of the existing signal
-    Strong trends (high ADX) = more confidence in trend-following signals
-    Weak trends (low ADX) = less confidence, favor mean reversion
+    ADX modifies the confidence of the existing signal.
     
-    Returns a modifier multiplier (0.7 to 1.3)
+    Key insight: Very high ADX (>50) often signals trend EXHAUSTION,
+    not strength. The trend may be overextended and due for reversal.
+    
+    ADX Interpretation:
+    - 0-20: Weak/no trend - reduce confidence, favor mean reversion
+    - 20-40: Healthy trend - boost confidence in trend direction
+    - 40-50: Strong trend - moderate boost, watch for exhaustion
+    - 50+: Potential exhaustion - reduce confidence, favor reversal
+    
+    Returns a modifier multiplier (0.7 to 1.2)
     """
     if not adx_data:
         return 1.0  # No modification
@@ -139,19 +99,25 @@ def score_adx(adx_data: Optional[Dict], base_score: float) -> float:
     
     if adx < 20:
         # Weak/no trend - reduce confidence in trend signals
-        return 0.8
-    elif adx < 25:
-        # Developing trend
-        return 0.9 if aligned else 0.85
+        # Mean reversion signals might be more reliable
+        return 0.85
+    elif adx < 30:
+        # Developing trend - slight boost if aligned
+        return 1.05 if aligned else 0.9
     elif adx < 40:
-        # Moderate trend
-        return 1.1 if aligned else 0.9
+        # Healthy trend - good confidence
+        return 1.15 if aligned else 0.9
+    elif adx < 50:
+        # Strong trend - but watch for exhaustion
+        return 1.1 if aligned else 0.85
     elif adx < 60:
-        # Strong trend
-        return 1.2 if aligned else 0.85
+        # Very strong trend - likely overextended
+        # Reduce confidence, trend may reverse soon
+        return 0.9 if aligned else 1.0
     else:
-        # Very strong trend
-        return 1.3 if aligned else 0.8
+        # Extreme ADX (>60) - high exhaustion risk
+        # Actually favor counter-trend signals slightly
+        return 0.8 if aligned else 1.1
 
 
 def score_demark(demark: Optional[Dict]) -> float:
@@ -175,16 +141,16 @@ def score_demark(demark: Optional[Dict]) -> float:
     
     if count < 6:
         # Early count - weak signal
-        base_score = 0.1
+        base_score = 0.15
     elif count < 8:
         # Building - moderate signal
-        base_score = 0.3
+        base_score = 0.35
     elif count == 8:
         # Almost complete - strong signal
-        base_score = 0.5
+        base_score = 0.55
     else:  # count >= 9
-        # Complete setup - very strong signal
-        base_score = 0.6
+        # Complete setup - very strong reversal signal
+        base_score = 0.75
     
     # Apply direction
     if signal == "bullish":
@@ -195,30 +161,48 @@ def score_demark(demark: Optional[Dict]) -> float:
         return 0
 
 
-def score_volume(volume_data: Optional[Dict]) -> float:
+def score_volume(volume_data: Optional[Dict], price_direction: float = 0) -> float:
     """
-    Score relative volume
-    High volume confirms moves, low volume suggests weakness
+    Score relative volume - now considers price direction
     
-    Returns -0.3 to +0.3 (acts as a confidence modifier on existing signal)
+    High volume CONFIRMS the current move:
+    - High volume + price up = bullish confirmation
+    - High volume + price down = bearish confirmation
+    - Low volume = weak conviction (reduces signal)
+    
+    Args:
+        volume_data: Relative volume data
+        price_direction: Positive for up move, negative for down move
+    
+    Returns -0.5 to +0.5
     """
     if not volume_data:
         return 0
     
     ratio = volume_data.get("ratio", 1.0)
     
+    # Determine volume strength
     if ratio > 2.0:
-        return 0.3  # Very high volume - strong confirmation
+        vol_strength = 0.5  # Very high volume
     elif ratio > 1.5:
-        return 0.2  # High volume
+        vol_strength = 0.35  # High volume
     elif ratio > 1.2:
-        return 0.1  # Above average
+        vol_strength = 0.2  # Above average
     elif ratio > 0.8:
-        return 0  # Normal
+        vol_strength = 0  # Normal - no signal
     elif ratio > 0.5:
-        return -0.1  # Below average
+        vol_strength = -0.15  # Below average - weak
     else:
-        return -0.2  # Low volume - weak conviction
+        vol_strength = -0.25  # Very low volume - very weak
+    
+    # If we have price direction, volume confirms that direction
+    if price_direction > 0 and vol_strength > 0:
+        return vol_strength  # High volume confirms bullish
+    elif price_direction < 0 and vol_strength > 0:
+        return -vol_strength  # High volume confirms bearish
+    else:
+        # Low volume or no clear direction - just return weakness signal
+        return vol_strength if vol_strength < 0 else 0
 
 
 def score_fear_greed(fg_value: Optional[int]) -> float:
@@ -249,14 +233,13 @@ def calculate_signal_score(analysis: Dict, market_data: Dict = None, fear_greed:
     """
     Calculate final signal score from technical analysis
     
-    Weights:
-    - RSI: 25%
-    - MACD: 15%
-    - Trend (EMA): 20%
-    - ADX: 15% (as modifier)
-    - DeMark: 15%
-    - Volume: 5%
+    Weights (updated - removed EMA/Bollinger):
+    - RSI: 30%
+    - MACD: 20%
+    - DeMark: 20%
+    - Volume: 10%
     - Fear & Greed: 5%
+    - ADX: 15% (applied as modifier)
     
     Returns score -3 to +3 with label
     """
@@ -269,40 +252,38 @@ def calculate_signal_score(analysis: Dict, market_data: Dict = None, fear_greed:
             "components": {},
         }
     
+    # Get 24h change for volume direction
+    change_24h = 0
+    if market_data:
+        change_24h = market_data.get("change_24h", 0) or 0
+    
     # Calculate base component scores
     rsi_score = score_rsi(analysis.get("rsi"))
     macd_score = score_macd(analysis.get("macd"))
-    trend_score = score_trend(analysis.get("trend", {}))
-    bollinger_score = score_bollinger(analysis.get("bollinger"))
     demark_score = score_demark(analysis.get("demark"))
-    volume_score = score_volume(analysis.get("volume"))
+    volume_score = score_volume(analysis.get("volume"), change_24h)
     fg_score = score_fear_greed(fear_greed)
     
     # Base composite (before ADX modifier)
+    # Weights: RSI 30%, MACD 20%, DeMark 20%, Volume 10%, F&G 5% = 85%
+    # Remaining 15% is implicit in the ADX modifier
     base_composite = (
-        rsi_score * 0.25 +
-        macd_score * 0.15 +
-        trend_score * 0.20 +
-        bollinger_score * 0.05 +
-        demark_score * 0.15 +
-        volume_score * 0.05 +
+        rsi_score * 0.30 +
+        macd_score * 0.20 +
+        demark_score * 0.20 +
+        volume_score * 0.10 +
         fg_score * 0.05
     )
     
-    # Apply ADX as trend strength modifier
+    # Normalize to account for ADX portion
+    base_composite = base_composite / 0.85
+    
+    # Apply ADX as trend strength/exhaustion modifier
     adx_modifier = score_adx(analysis.get("adx"), base_composite)
     composite = base_composite * adx_modifier
     
-    # Factor in 24h change if available (small weight)
-    if market_data:
-        change_24h = market_data.get("change_24h", 0)
-        if change_24h:
-            # Small boost/penalty based on recent performance
-            change_factor = max(-0.15, min(0.15, change_24h / 50))
-            composite = composite * 0.9 + change_factor * 0.1
-    
     # Map composite to -3 to +3 score
-    if composite >= 0.6:
+    if composite >= 0.55:
         score = 3
         label = "STRONG LONG"
     elif composite >= 0.35:
@@ -317,7 +298,7 @@ def calculate_signal_score(analysis: Dict, market_data: Dict = None, fear_greed:
     elif composite >= -0.35:
         score = -1
         label = "LEAN SHORT"
-    elif composite >= -0.6:
+    elif composite >= -0.55:
         score = -2
         label = "SHORT"
     else:
@@ -325,17 +306,26 @@ def calculate_signal_score(analysis: Dict, market_data: Dict = None, fear_greed:
         label = "STRONG SHORT"
     
     # Calculate confidence based on indicator agreement
-    scores = [rsi_score, macd_score, trend_score, demark_score]
+    scores = [rsi_score, macd_score, demark_score]
     positive = sum(1 for s in scores if s > 0.1)
     negative = sum(1 for s in scores if s < -0.1)
     agreement = max(positive, negative) / len(scores)
     
-    # ADX also affects confidence
+    # ADX value affects confidence (but high ADX = less certain due to exhaustion risk)
     adx_data = analysis.get("adx", {})
     adx_value = adx_data.get("adx", 25) if adx_data else 25
-    adx_confidence_boost = min(0.2, adx_value / 100)
     
-    confidence = round(0.4 + (agreement * 0.4) + adx_confidence_boost, 2)
+    # Confidence peaks around ADX 30-40, lower at extremes
+    if adx_value < 20:
+        adx_confidence = 0.05
+    elif adx_value < 40:
+        adx_confidence = 0.15
+    elif adx_value < 50:
+        adx_confidence = 0.1
+    else:
+        adx_confidence = 0.05  # High ADX = more uncertainty
+    
+    confidence = round(0.4 + (agreement * 0.4) + adx_confidence, 2)
     confidence = min(1.0, confidence)
     
     return {
@@ -346,7 +336,6 @@ def calculate_signal_score(analysis: Dict, market_data: Dict = None, fear_greed:
         "components": {
             "rsi": round(rsi_score, 3),
             "macd": round(macd_score, 3),
-            "trend": round(trend_score, 3),
             "demark": round(demark_score, 3),
             "adx_modifier": round(adx_modifier, 3),
             "volume": round(volume_score, 3),
@@ -381,10 +370,10 @@ def get_adx_display(adx_data: Optional[Dict]) -> Dict:
         strength = "weak"
     elif adx < 40:
         strength = "moderate"
-    elif adx < 60:
+    elif adx < 50:
         strength = "strong"
     else:
-        strength = "very strong"
+        strength = "exhausted"  # Changed from "very strong" to indicate potential exhaustion
     
     return {
         "value": adx,
