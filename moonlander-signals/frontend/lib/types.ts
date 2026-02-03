@@ -9,7 +9,7 @@ export interface FearGreedData {
 
 export interface ADXData {
   value: number;
-  trend_strength: 'weak' | 'moderate' | 'strong' | 'exhausted' | 'none';
+  trend_strength: 'weak' | 'moderate' | 'strong' | 'very strong' | 'exhausted' | 'none';
   direction: 'bullish' | 'bearish' | 'neutral';
   trending: boolean;
 }
