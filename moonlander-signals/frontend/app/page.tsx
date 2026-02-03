@@ -76,21 +76,21 @@ function ScoreBadge({ score }: { score: number }) {
   );
 }
 
-// ADX Cell
+// ADX Cell - Updated to show exhausted state
 function ADXCell({ adx }: { adx: Asset['adx'] }) {
   if (!adx) return <span className="text-slate-600">—</span>;
   const value = adx.value;
   const getColor = () => {
     if (value < 20) return 'text-slate-500';
     if (value < 40) return 'text-yellow-400';
-    if (value < 60) return 'text-orange-400';
-    return 'text-red-400';
+    if (value < 50) return 'text-orange-400';
+    return 'text-red-400'; // Exhausted
   };
   const getLabel = () => {
     if (value < 20) return 'Weak';
     if (value < 40) return 'Mod';
-    if (value < 60) return 'Strong';
-    return 'V.Strong';
+    if (value < 50) return 'Strong';
+    return 'Exhausted'; // Changed from V.Strong
   };
   return (
     <div className="flex flex-col items-center">
@@ -100,19 +100,69 @@ function ADXCell({ adx }: { adx: Asset['adx'] }) {
   );
 }
 
-// DeMark Cell
+// Helper function to get DeMark description based on type and count
+function getDemarkDescription(demark: Asset['demark']): string {
+  if (!demark || !demark.count) return '';
+  
+  // Use type_desc from backend if available
+  if (demark.type_desc) return demark.type_desc;
+  
+  // Fallback logic if type_desc not present
+  const count = demark.count;
+  const type = demark.type;
+  
+  if (type === 'S') {
+    // Sell setup = price falling
+    if (count >= 8) return 'Sell Setup (Bullish Reversal)';
+    if (count <= 4) return 'Sell Setup (Bearish)';
+    return 'Sell Setup (Maturing)';
+  } else {
+    // Buy setup = price rising
+    if (count >= 8) return 'Buy Setup (Bearish Reversal)';
+    if (count <= 4) return 'Buy Setup (Bullish)';
+    return 'Buy Setup (Maturing)';
+  }
+}
+
+// Helper function to get DeMark signal based on type and count
+function getDemarkSignal(demark: Asset['demark']): 'bullish' | 'bearish' | 'neutral' {
+  if (!demark || !demark.count) return 'neutral';
+  
+  // Use signal from backend if available and count-appropriate
+  const count = demark.count;
+  const type = demark.type;
+  
+  if (type === 'S') {
+    // Sell setup = price falling
+    if (count >= 8) return 'bullish'; // Exhaustion reversal
+    if (count <= 4) return 'bearish'; // Fresh downtrend
+    return 'neutral';
+  } else {
+    // Buy setup = price rising
+    if (count >= 8) return 'bearish'; // Exhaustion reversal
+    if (count <= 4) return 'bullish'; // Fresh uptrend
+    return 'neutral';
+  }
+}
+
+// DeMark Cell - Updated with correct signal logic
 function DemarkCell({ demark }: { demark: Asset['demark'] }) {
   if (!demark || !demark.count) return <span className="text-slate-600">—</span>;
+  
   const isComplete = demark.completed;
-  const isBullish = demark.signal === 'bullish';
+  const signal = getDemarkSignal(demark);
+  
   let colorClass = 'text-slate-400';
-  if (demark.count >= 7) {
-    colorClass = isBullish ? 'text-emerald-400' : 'text-red-400';
+  if (signal === 'bullish') {
+    colorClass = 'text-emerald-400';
+  } else if (signal === 'bearish') {
+    colorClass = 'text-red-400';
   }
+  
   return (
     <div className="flex items-center gap-1">
       <span className={`font-mono font-bold ${colorClass}`}>{demark.display}</span>
-      {isComplete && <Flame size={14} className={isBullish ? 'text-emerald-400' : 'text-red-400'} />}
+      {isComplete && <Flame size={14} className={signal === 'bullish' ? 'text-emerald-400' : 'text-red-400'} />}
     </div>
   );
 }
@@ -152,8 +202,11 @@ function RSICell({ rsi }: { rsi: Asset['rsi'] }) {
   );
 }
 
-// Expanded Row
+// Expanded Row - Updated with correct DeMark display
 function ExpandedRow({ asset }: { asset: Asset }) {
+  const demarkSignal = getDemarkSignal(asset.demark);
+  const demarkDesc = getDemarkDescription(asset.demark);
+  
   return (
     <div className="bg-slate-900/50 border-t border-slate-700/50 px-4 py-4 animate-slideDown">
       <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
@@ -177,7 +230,7 @@ function ExpandedRow({ asset }: { asset: Asset }) {
           </div>
         </div>
 
-        {/* ADX */}
+        {/* ADX - Updated to show exhausted state */}
         <div className="bg-slate-800/50 rounded-xl p-3 border border-slate-700/30">
           <h4 className="text-slate-400 text-xs uppercase tracking-wider mb-2 flex items-center gap-2">
             <BarChart3 size={12} /> ADX Trend
@@ -190,17 +243,28 @@ function ExpandedRow({ asset }: { asset: Asset }) {
               </div>
               <div className="flex items-center justify-between">
                 <span className="text-slate-400 text-xs">Strength</span>
-                <span className={`text-xs font-semibold ${asset.adx.trend_strength === 'strong' || asset.adx.trend_strength === 'very strong' ? 'text-orange-400' : 'text-slate-400'}`}>{asset.adx.trend_strength}</span>
+                <span className={`text-xs font-semibold ${
+                  asset.adx.trend_strength === 'exhausted' ? 'text-red-400' :
+                  asset.adx.trend_strength === 'strong' ? 'text-orange-400' : 
+                  asset.adx.trend_strength === 'moderate' ? 'text-yellow-400' :
+                  'text-slate-400'
+                }`}>{asset.adx.trend_strength}</span>
               </div>
               <div className="flex items-center justify-between">
                 <span className="text-slate-400 text-xs">Direction</span>
                 <span className={`text-xs font-semibold ${asset.adx.direction === 'bullish' ? 'text-emerald-400' : asset.adx.direction === 'bearish' ? 'text-red-400' : 'text-slate-400'}`}>{asset.adx.direction}</span>
               </div>
+              {asset.adx.value >= 50 && (
+                <div className="flex items-center gap-2 mt-2 p-2 bg-amber-500/10 rounded-lg border border-amber-500/30">
+                  <AlertTriangle size={14} className="text-amber-400" />
+                  <span className="text-xs text-amber-400">Trend may be overextended</span>
+                </div>
+              )}
             </div>
           ) : <span className="text-slate-600">No data</span>}
         </div>
 
-        {/* DeMark */}
+        {/* DeMark - Updated with correct interpretation */}
         <div className="bg-slate-800/50 rounded-xl p-3 border border-slate-700/30">
           <h4 className="text-slate-400 text-xs uppercase tracking-wider mb-2 flex items-center gap-2">
             <AlertTriangle size={12} /> DeMark
@@ -213,13 +277,17 @@ function ExpandedRow({ asset }: { asset: Asset }) {
               </div>
               <div className="flex items-center justify-between">
                 <span className="text-slate-400 text-xs">Type</span>
-                <span className="text-slate-300 text-xs">{asset.demark.type === 'S' ? 'Sell Setup (Bullish)' : 'Buy Setup (Bearish)'}</span>
+                <span className={`text-xs ${
+                  demarkSignal === 'bullish' ? 'text-emerald-400' :
+                  demarkSignal === 'bearish' ? 'text-red-400' :
+                  'text-slate-300'
+                }`}>{demarkDesc}</span>
               </div>
               {asset.demark.completed && (
                 <div className="flex items-center gap-2 mt-2 p-2 bg-slate-900/50 rounded-lg">
-                  <Flame size={16} className={asset.demark.signal === 'bullish' ? 'text-emerald-400' : 'text-red-400'} />
-                  <span className={`text-xs font-semibold ${asset.demark.signal === 'bullish' ? 'text-emerald-400' : 'text-red-400'}`}>
-                    {asset.demark.signal === 'bullish' ? 'Bullish Reversal!' : 'Bearish Reversal!'}
+                  <Flame size={16} className={demarkSignal === 'bullish' ? 'text-emerald-400' : 'text-red-400'} />
+                  <span className={`text-xs font-semibold ${demarkSignal === 'bullish' ? 'text-emerald-400' : 'text-red-400'}`}>
+                    {demarkSignal === 'bullish' ? 'Bullish Reversal!' : 'Bearish Reversal!'}
                   </span>
                 </div>
               )}
@@ -256,24 +324,22 @@ function ExpandedRow({ asset }: { asset: Asset }) {
 function AssetRow({ asset, isExpanded, onToggle }: { asset: Asset; isExpanded: boolean; onToggle: () => void }) {
   return (
     <>
-      <tr className="border-b border-slate-800/50 hover:bg-slate-800/30 transition-all duration-200 cursor-pointer group" onClick={onToggle}>
+      <tr className={`border-b border-slate-800/50 hover:bg-slate-800/30 transition-colors ${isExpanded ? 'bg-slate-800/40' : ''}`}>
         <td className="px-3 py-2.5">
           <div className="flex items-center gap-2">
-            <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-slate-700 to-slate-800 flex items-center justify-center font-bold text-[10px] border border-slate-600/50 group-hover:border-cyan-500/30">
+            <div className="w-7 h-7 rounded-lg bg-slate-800 flex items-center justify-center text-[10px] font-bold text-slate-300 border border-slate-700">
               {asset.symbol.slice(0, 3)}
             </div>
             <div>
-              <div className="font-semibold text-white text-xs group-hover:text-cyan-400">{asset.symbol}</div>
-              <div className="text-[9px] text-slate-500 hidden sm:block">{asset.name}</div>
+              <div className="font-semibold text-white text-xs">{asset.symbol}</div>
+              <div className="text-[10px] text-slate-500">{asset.name}</div>
             </div>
           </div>
         </td>
-        <td className="px-3 py-2.5 font-mono">
-          <div className="text-white font-semibold text-xs">
-            ${asset.price.toLocaleString(undefined, { maximumFractionDigits: asset.price > 100 ? 0 : asset.price > 1 ? 2 : 6 })}
-          </div>
-          <div className={`text-[9px] ${asset.change_24h >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-            {asset.change_24h >= 0 ? '+' : ''}{asset.change_24h.toFixed(2)}%
+        <td className="px-3 py-2.5">
+          <div className="font-mono text-xs text-white">${asset.price < 1 ? asset.price.toFixed(6) : asset.price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+          <div className={`text-[10px] font-medium ${asset.change_24h >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+            {asset.change_24h >= 0 ? '+' : ''}{asset.change_24h?.toFixed(2)}%
           </div>
         </td>
         <td className="px-3 py-2.5"><ScoreBadge score={asset.score} /></td>
@@ -282,55 +348,69 @@ function AssetRow({ asset, isExpanded, onToggle }: { asset: Asset; isExpanded: b
         <td className="px-3 py-2.5 hidden lg:table-cell"><DemarkCell demark={asset.demark} /></td>
         <td className="px-3 py-2.5 hidden md:table-cell"><VolumeCell volume={asset.relative_volume} /></td>
         <td className="px-3 py-2.5">
-          {isExpanded ? <ChevronUp size={16} className="text-cyan-400" /> : <ChevronDown size={16} className="text-slate-600 group-hover:text-cyan-400" />}
+          <button onClick={onToggle} className="p-1 rounded-lg hover:bg-slate-700/50 transition-colors text-slate-400 hover:text-cyan-400">
+            {isExpanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+          </button>
         </td>
       </tr>
-      {isExpanded && <tr><td colSpan={8}><ExpandedRow asset={asset} /></td></tr>}
+      {isExpanded && (
+        <tr>
+          <td colSpan={8}><ExpandedRow asset={asset} /></td>
+        </tr>
+      )}
     </>
   );
 }
 
-// Market Sentiment
+// Market Sentiment Bar
 function MarketSentiment({ assets }: { assets: Asset[] }) {
   const bullish = assets.filter(a => a.score > 0).length;
   const bearish = assets.filter(a => a.score < 0).length;
   const neutral = assets.filter(a => a.score === 0).length;
   const total = assets.length || 1;
-  const sentiment = bullish > bearish + 3 ? 'BULLISH' : bearish > bullish + 3 ? 'BEARISH' : 'MIXED';
-  const sentimentColor = sentiment === 'BULLISH' ? 'text-emerald-400' : sentiment === 'BEARISH' ? 'text-red-400' : 'text-amber-400';
+
+  const sentiment = bullish > bearish ? 'BULLISH' : bearish > bullish ? 'BEARISH' : 'NEUTRAL';
+  const sentimentColor = bullish > bearish ? 'text-emerald-400' : bearish > bullish ? 'text-red-400' : 'text-slate-400';
 
   return (
-    <div className="bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 rounded-2xl p-5 border border-slate-700/50">
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-4">
-        <div>
-          <h2 className="text-slate-400 text-xs uppercase tracking-wider mb-1">Market Sentiment</h2>
-          <div className={`text-3xl font-black tracking-tight ${sentimentColor}`}>{sentiment}</div>
-        </div>
-        <div className="flex gap-6 text-center">
-          <div><div className="text-emerald-400 text-xl font-bold">{bullish}</div><div className="text-[9px] text-slate-500 uppercase">Bullish</div></div>
-          <div><div className="text-slate-400 text-xl font-bold">{neutral}</div><div className="text-[9px] text-slate-500 uppercase">Neutral</div></div>
-          <div><div className="text-red-400 text-xl font-bold">{bearish}</div><div className="text-[9px] text-slate-500 uppercase">Bearish</div></div>
+    <div className="bg-gradient-to-br from-slate-900/80 to-slate-900/40 rounded-xl p-4 border border-slate-800/50">
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-xs text-slate-400 uppercase tracking-wider">Market Sentiment</span>
+        <div className="flex items-center gap-3 text-[10px]">
+          <span className="text-slate-500">BULLISH</span>
+          <span className="text-slate-500">NEUTRAL</span>
+          <span className="text-slate-500">BEARISH</span>
         </div>
       </div>
-      <div className="h-3 bg-slate-700 rounded-full overflow-hidden flex">
-        <div className="bg-emerald-500 transition-all duration-700" style={{ width: `${(bullish / total) * 100}%` }} />
-        <div className="bg-slate-500 transition-all duration-700" style={{ width: `${(neutral / total) * 100}%` }} />
-        <div className="bg-red-500 transition-all duration-700" style={{ width: `${(bearish / total) * 100}%` }} />
+      <div className="flex items-center gap-2 mb-2">
+        <span className={`text-xl font-black ${sentimentColor}`}>{sentiment}</span>
+      </div>
+      <div className="h-3 bg-slate-800 rounded-full overflow-hidden flex">
+        <div className="bg-gradient-to-r from-emerald-600 to-emerald-500 transition-all" style={{ width: `${(bullish / total) * 100}%` }} />
+        <div className="bg-slate-600 transition-all" style={{ width: `${(neutral / total) * 100}%` }} />
+        <div className="bg-gradient-to-r from-red-500 to-red-600 transition-all" style={{ width: `${(bearish / total) * 100}%` }} />
+      </div>
+      <div className="flex justify-between mt-2 text-[10px] text-slate-500">
+        <span>{bullish} Long</span>
+        <span>{neutral} Neutral</span>
+        <span>{bearish} Short</span>
       </div>
     </div>
   );
 }
 
 // Stats Card
-function StatsCard({ icon: Icon, label, value, subValue, color }: { icon: React.ElementType; label: string; value: number | string; subValue?: string; color: string }) {
+function StatsCard({ icon: Icon, label, value, subValue, color }: { icon: React.ElementType; label: string; value: number | string; subValue: string; color: string }) {
   return (
     <div className="bg-gradient-to-br from-slate-900 to-slate-800 rounded-xl p-4 border border-slate-700/50 hover:border-cyan-500/30 transition-all duration-300">
-      <div className="flex items-start justify-between mb-2">
-        <div className={`p-2 rounded-lg bg-slate-800 ${color}`}><Icon size={16} /></div>
+      <div className="flex items-center gap-2 mb-2">
+        <Icon size={18} className={color} />
+        <span className="text-slate-400 text-xs uppercase tracking-wider">{label}</span>
       </div>
-      <div className="text-xl font-bold text-white mb-0.5">{value}</div>
-      <div className="text-slate-500 text-xs">{label}</div>
-      {subValue && <div className="text-[9px] text-slate-600 mt-0.5">{subValue}</div>}
+      <div className="flex items-end gap-2">
+        <span className="text-2xl font-black text-white">{value}</span>
+      </div>
+      <span className="text-[10px] text-slate-500">{subValue}</span>
     </div>
   );
 }
@@ -338,21 +418,17 @@ function StatsCard({ icon: Icon, label, value, subValue, color }: { icon: React.
 // Main Component
 export default function MoonlanderSignals() {
   const [data, setData] = useState<SignalsResponse | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
   const [expandedRow, setExpandedRow] = useState<string | null>(null);
   const [filter, setFilter] = useState('all');
   const [searchQuery, setSearchQuery] = useState('');
   const [sortBy, setSortBy] = useState('score');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
-  const [isLoading, setIsLoading] = useState(true);
 
   const loadData = async () => {
     setIsLoading(true);
-    try {
-      const result = await fetchSignals();
-      setData(result);
-    } catch (error) {
-      console.error('Error loading data:', error);
-    }
+    const signals = await fetchSignals();
+    setData(signals);
     setIsLoading(false);
   };
 
@@ -490,8 +566,8 @@ export default function MoonlanderSignals() {
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-[10px]">
               <div className="flex items-center gap-2"><span className="text-emerald-400 font-mono">RSI &lt;30</span><span className="text-slate-400">Oversold (Bullish)</span></div>
               <div className="flex items-center gap-2"><span className="text-red-400 font-mono">RSI &gt;70</span><span className="text-slate-400">Overbought (Bearish)</span></div>
-              <div className="flex items-center gap-2"><span className="text-orange-400 font-mono">ADX &gt;40</span><span className="text-slate-400">Strong Trend</span></div>
-              <div className="flex items-center gap-2"><span className="text-yellow-400 font-mono">S:9! / B:9!</span><span className="text-slate-400">DeMark Exhaustion</span></div>
+              <div className="flex items-center gap-2"><span className="text-red-400 font-mono">ADX &gt;50</span><span className="text-slate-400">Trend Exhausted</span></div>
+              <div className="flex items-center gap-2"><span className="text-yellow-400 font-mono">S:9! / B:9!</span><span className="text-slate-400">DeMark Reversal</span></div>
             </div>
           </div>
 
