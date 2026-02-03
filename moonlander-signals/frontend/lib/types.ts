@@ -9,7 +9,7 @@ export interface FearGreedData {
 
 export interface ADXData {
   value: number;
-  trend_strength: 'weak' | 'moderate' | 'strong' | 'very strong' | 'none';
+  trend_strength: 'weak' | 'moderate' | 'strong' | 'exhausted' | 'none';
   direction: 'bullish' | 'bearish' | 'neutral';
   trending: boolean;
 }
@@ -17,7 +17,8 @@ export interface ADXData {
 export interface DemarkData {
   count: number;
   type: 'S' | 'B' | null;
-  signal: 'bullish' | 'bearish' | null;
+  type_desc?: string;  // New field from backend: "Sell Setup (Bearish)", "Buy Setup (Bullish Reversal)", etc.
+  signal: 'bullish' | 'bearish' | 'neutral' | null;
   display: string;
   completed: boolean;
 }
