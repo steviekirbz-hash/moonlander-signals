@@ -79,56 +79,110 @@ def score_adx(adx_data: Optional[Dict], base_score: float) -> float:
     Key insight: Very high ADX (>50) often signals trend EXHAUSTION,
     not strength. The trend may be overextended and due for reversal.
     
-    ADX Interpretation:
-    - 0-20: Weak/no trend - reduce confidence, favor mean reversion
-    - 20-40: Healthy trend - boost confidence in trend direction
-    - 40-50: Strong trend - moderate boost, watch for exhaustion
-    - 50+: Potential exhaustion - reduce confidence, favor reversal
+    Logic:
+    - Low ADX (<20): Weak trend, reduce confidence in any directional signal
+    - Medium ADX (20-40): Healthy trend, boost confidence if signal aligns with trend
+    - High ADX (40-50): Strong trend, moderate boost but watch for exhaustion
+    - Very High ADX (>50): Exhaustion likely - BOOST counter-trend signals
     
-    Returns a modifier multiplier (0.7 to 1.2)
+    The key fix: When ADX shows exhaustion, we should SUPPORT reversal signals,
+    not diminish them. If ADX direction is bearish but exhausted, bullish signals
+    should be boosted.
+    
+    Returns a modifier multiplier (0.7 to 1.25)
     """
     if not adx_data:
         return 1.0  # No modification
     
     adx = adx_data.get("adx", 25)
-    direction = adx_data.get("direction", "neutral")
+    trend_direction = adx_data.get("direction", "neutral")  # Current trend direction
     
-    # Determine if base score aligns with ADX direction
-    score_direction = "bullish" if base_score > 0 else ("bearish" if base_score < 0 else "neutral")
-    aligned = (score_direction == direction) or score_direction == "neutral"
+    # Determine signal direction from base score
+    signal_is_bullish = base_score > 0.05
+    signal_is_bearish = base_score < -0.05
+    signal_is_neutral = not signal_is_bullish and not signal_is_bearish
+    
+    # Does the signal align WITH the current trend?
+    signal_aligns_with_trend = (
+        (signal_is_bullish and trend_direction == "bullish") or
+        (signal_is_bearish and trend_direction == "bearish")
+    )
+    
+    # Is the signal a REVERSAL (counter-trend)?
+    signal_is_reversal = (
+        (signal_is_bullish and trend_direction == "bearish") or
+        (signal_is_bearish and trend_direction == "bullish")
+    )
     
     if adx < 20:
-        # Weak/no trend - reduce confidence in trend signals
-        # Mean reversion signals might be more reliable
+        # Weak/no trend - reduce confidence in any directional signal
         return 0.85
+    
     elif adx < 30:
-        # Developing trend - slight boost if aligned
-        return 1.05 if aligned else 0.9
+        # Developing trend
+        if signal_aligns_with_trend:
+            return 1.1  # Boost trend-following signals
+        elif signal_is_reversal:
+            return 0.85  # Reduce counter-trend signals
+        else:
+            return 1.0
+    
     elif adx < 40:
-        # Healthy trend - good confidence
-        return 1.15 if aligned else 0.9
+        # Healthy established trend
+        if signal_aligns_with_trend:
+            return 1.15  # Good confidence in trend
+        elif signal_is_reversal:
+            return 0.8  # Counter-trend is risky
+        else:
+            return 1.0
+    
     elif adx < 50:
-        # Strong trend - but watch for exhaustion
-        return 1.1 if aligned else 0.85
+        # Strong trend - starting to watch for exhaustion
+        if signal_aligns_with_trend:
+            return 1.05  # Still ok but less confident
+        elif signal_is_reversal:
+            return 0.95  # Reversal becoming more plausible
+        else:
+            return 1.0
+    
     elif adx < 60:
         # Very strong trend - likely overextended
-        # Reduce confidence, trend may reverse soon
-        return 0.9 if aligned else 1.0
+        if signal_aligns_with_trend:
+            return 0.9  # Reduce confidence in trend continuing
+        elif signal_is_reversal:
+            return 1.1  # BOOST reversal signals
+        else:
+            return 1.0
+    
     else:
-        # Extreme ADX (>60) - high exhaustion risk
-        # Actually favor counter-trend signals slightly
-        return 0.8 if aligned else 1.1
+        # Extreme ADX (>60) - high exhaustion probability
+        if signal_aligns_with_trend:
+            return 0.8  # Trend is exhausted, don't trust continuation
+        elif signal_is_reversal:
+            return 1.2  # Strongly favor reversal signals
+        else:
+            return 1.0
 
 
 def score_demark(demark: Optional[Dict]) -> float:
     """
-    Score DeMark Sequential signal
+    Score DeMark Sequential signal - CORRECTED LOGIC
     
-    Sell Setup (S:1-9): Price falling, sellers getting exhausted
-        → When complete (9), expect BULLISH reversal
+    DeMark Sequential counts consecutive bars where:
+    - Sell Setup: close < close[4 bars ago] (price is FALLING)
+    - Buy Setup: close > close[4 bars ago] (price is RISING)
     
-    Buy Setup (B:1-9): Price rising, buyers getting exhausted  
-        → When complete (9), expect BEARISH reversal
+    The SIGNAL depends on both the setup type AND the count:
+    
+    SELL SETUP (S:1-9) - Price has been falling:
+    - S:1-4 = Bearish (downtrend is fresh/active)
+    - S:5-7 = Neutral (trend maturing)
+    - S:8-9 = Bullish (sellers exhausted, expect reversal UP)
+    
+    BUY SETUP (B:1-9) - Price has been rising:
+    - B:1-4 = Bullish (uptrend is fresh/active)
+    - B:5-7 = Neutral (trend maturing)
+    - B:8-9 = Bearish (buyers exhausted, expect reversal DOWN)
     
     Returns -1 to +1
     """
@@ -136,34 +190,50 @@ def score_demark(demark: Optional[Dict]) -> float:
         return 0
     
     count = demark.get("count", 0)
-    signal = demark.get("signal")  # 'bullish' or 'bearish'
-    completed = demark.get("completed", False)
+    direction = demark.get("direction")  # 'sell' or 'buy'
     
-    if count < 6:
-        # Early count - weak signal
-        base_score = 0.15
-    elif count < 8:
-        # Building - moderate signal
-        base_score = 0.35
-    elif count == 8:
-        # Almost complete - strong signal
-        base_score = 0.55
-    else:  # count >= 9
-        # Complete setup - very strong reversal signal
-        base_score = 0.75
+    if direction == "sell":
+        # Sell setup = price has been FALLING
+        if count <= 4:
+            # Early in downtrend - bearish signal (trend is active)
+            if count <= 2:
+                return -0.3  # Very early downtrend
+            else:
+                return -0.2  # Downtrend establishing
+        elif count <= 7:
+            # Mid-count - trend maturing, weakening signal
+            return -0.1 if count <= 5 else 0
+        else:
+            # Count 8-9 - sellers exhausted, expect bullish reversal
+            if count >= 9:
+                return 0.7  # Complete setup - strong reversal signal
+            else:
+                return 0.45  # Count 8 - reversal likely soon
     
-    # Apply direction
-    if signal == "bullish":
-        return base_score
-    elif signal == "bearish":
-        return -base_score
-    else:
-        return 0
+    elif direction == "buy":
+        # Buy setup = price has been RISING
+        if count <= 4:
+            # Early in uptrend - bullish signal (trend is active)
+            if count <= 2:
+                return 0.3  # Very early uptrend
+            else:
+                return 0.2  # Uptrend establishing
+        elif count <= 7:
+            # Mid-count - trend maturing, weakening signal
+            return 0.1 if count <= 5 else 0
+        else:
+            # Count 8-9 - buyers exhausted, expect bearish reversal
+            if count >= 9:
+                return -0.7  # Complete setup - strong reversal signal
+            else:
+                return -0.45  # Count 8 - reversal likely soon
+    
+    return 0
 
 
 def score_volume(volume_data: Optional[Dict], price_direction: float = 0) -> float:
     """
-    Score relative volume - now considers price direction
+    Score relative volume - considers price direction
     
     High volume CONFIRMS the current move:
     - High volume + price up = bullish confirmation
@@ -233,7 +303,7 @@ def calculate_signal_score(analysis: Dict, market_data: Dict = None, fear_greed:
     """
     Calculate final signal score from technical analysis
     
-    Weights (updated - removed EMA/Bollinger):
+    Weights:
     - RSI: 30%
     - MACD: 20%
     - DeMark: 20%
@@ -373,7 +443,7 @@ def get_adx_display(adx_data: Optional[Dict]) -> Dict:
     elif adx < 50:
         strength = "strong"
     else:
-        strength = "exhausted"  # Changed from "very strong" to indicate potential exhaustion
+        strength = "exhausted"
     
     return {
         "value": adx,
@@ -384,18 +454,41 @@ def get_adx_display(adx_data: Optional[Dict]) -> Dict:
 
 
 def get_demark_display(demark: Optional[Dict]) -> Dict:
-    """Get DeMark Sequential formatted for display"""
+    """Get DeMark Sequential formatted for display with corrected signal interpretation"""
     if not demark or not demark.get("active"):
         return {"count": 0, "type": None, "signal": None, "display": "—"}
     
     count = demark.get("count", 0)
     direction = demark.get("direction")  # 'sell' or 'buy'
-    signal = demark.get("signal")  # 'bullish' or 'bearish'
     completed = demark.get("completed", False)
     
-    # S = Sell setup (price falling, expect bullish reversal)
-    # B = Buy setup (price rising, expect bearish reversal)
+    # S = Sell setup (price falling)
+    # B = Buy setup (price rising)
     type_label = "S" if direction == "sell" else "B"
+    
+    # Determine the actual signal based on count AND direction
+    if direction == "sell":
+        # Price falling
+        if count >= 8:
+            signal = "bullish"  # Exhaustion - expect reversal up
+            type_desc = "Sell Setup (Bullish Reversal)"
+        elif count <= 4:
+            signal = "bearish"  # Fresh downtrend
+            type_desc = "Sell Setup (Bearish)"
+        else:
+            signal = "neutral"  # Maturing
+            type_desc = "Sell Setup (Maturing)"
+    else:
+        # Price rising
+        if count >= 8:
+            signal = "bearish"  # Exhaustion - expect reversal down
+            type_desc = "Buy Setup (Bearish Reversal)"
+        elif count <= 4:
+            signal = "bullish"  # Fresh uptrend
+            type_desc = "Buy Setup (Bullish)"
+        else:
+            signal = "neutral"  # Maturing
+            type_desc = "Buy Setup (Maturing)"
     
     if completed:
         display = f"{type_label}:9!"
@@ -405,6 +498,7 @@ def get_demark_display(demark: Optional[Dict]) -> Dict:
     return {
         "count": count,
         "type": type_label,
+        "type_desc": type_desc,
         "signal": signal,
         "display": display,
         "completed": completed,
